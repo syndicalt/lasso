@@ -1,0 +1,47 @@
+[package]
+name = "lasso"
+version = "0.1.0"
+edition = "2021"
+description = "Lasso-select regions of images and let your AI agent edit them"
+license = "MIT"
+repository = "https://github.com/syndicalt/lasso"
+readme = "README.md"
+rust-version = "1.85"
+
+[[bin]]
+name = "lasso"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.36", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "wayland",
+    "x11",
+] }
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "webp",
+    "gif",
+    "bmp",
+] }
+rmcp = { version = "3.5", features = [
+    "server",
+    "transport-streamable-http-server",
+    "macros",
+    "schemars",
+] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1.0"
+base64 = "0.22"
+rfd = "0.17"
+parking_lot = "0.12"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
