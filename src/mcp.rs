@@ -4,7 +4,7 @@
 //! All tools operate on the shared `Arc<Mutex<Document>>` so agent edits and
 //! GUI edits hit the same document.
 
-use crate::core::{parse_color, Document, Op, Region, Selection};
+use crate::core::{decode_png_b64, parse_color, Anchor, Document, Op, Region, Selection};
 use base64::Engine;
 use image::RgbaImage;
 use parking_lot::Mutex;
@@ -237,6 +237,7 @@ impl LassoServer {
                 })
             }),
             "can_undo": doc.can_undo(),
+            "can_redo": doc.can_redo(),
         }))
     }
 
@@ -290,6 +291,58 @@ impl LassoServer {
             "width": saved.1,
             "height": saved.2,
         })))
+    }
+
+    #[tool(description = "Composite a base64-encoded PNG onto the canvas with its top-left corner at x,y (image pixels). blend: alpha-composite (default true) or hard replace. within_selection: restrict writes to the current lasso selection polygon. Use this for any drawing or compositing: generate the PNG however you like, then paste it. The paste is undoable.")]
+    async fn paste_image(
+        &self,
+        Parameters(PasteImageArgs { image_b64, x, y, blend, within_selection }): Parameters<PasteImageArgs>,
+    ) -> Result<Json<serde_json::Value>, McpError> {
+        let img = decode_png_b64(&image_b64).map_err(|e| McpError::invalid_params(e, None))?;
+        let (w, h) = {
+            let mut doc = self.state.document.lock();
+            doc.paste(&img, x, y, blend.unwrap_or(true), within_selection.unwrap_or(false))
+                .map_err(|e| McpError::invalid_params(e, None))?
+        };
+        self.note(format!("agent pasted {w}x{h} image at {x},{y}"));
+        Ok(Json(serde_json::json!({ "pasted": { "width": w, "height": h, "x": x, "y": y } })))
+    }
+
+    #[tool(description = "Load an image file from disk and composite it onto the canvas with its top-left corner at x,y. Same blend and within_selection semantics as paste_image. The paste is undoable.")]
+    async fn paste_file(
+        &self,
+        Parameters(PasteFileArgs { path, x, y, blend, within_selection }): Parameters<PasteFileArgs>,
+    ) -> Result<Json<serde_json::Value>, McpError> {
+        let path = PathBuf::from(shellexpand_path(&path));
+        let img = image::open(&path)
+            .map_err(|e| McpError::invalid_params(format!("open {}: {e}", path.display()), None))?
+            .to_rgba8();
+        let (w, h) = {
+            let mut doc = self.state.document.lock();
+            doc.paste(&img, x, y, blend.unwrap_or(true), within_selection.unwrap_or(false))
+                .map_err(|e| McpError::invalid_params(e, None))?
+        };
+        self.note(format!("agent pasted {} ({w}x{h}) at {x},{y}", path.display()));
+        Ok(Json(serde_json::json!({ "pasted": { "path": path.display().to_string(), "width": w, "height": h, "x": x, "y": y } })))
+    }
+
+    #[tool(description = "Resize the canvas to width x height. The current image is re-anchored at anchor (top_left, top, top_right, left, center, right, bottom_left, bottom, bottom_right) and new areas are filled with fill color (#RRGGBB, #RRGGBBAA or \"transparent\"). Clears the selection. Undoable.")]
+    async fn resize_canvas(
+        &self,
+        Parameters(ResizeCanvasArgs { width, height, anchor, fill }): Parameters<ResizeCanvasArgs>,
+    ) -> Result<Json<serde_json::Value>, McpError> {
+        let fill = match fill {
+            Some(f) => parse_color(&f).map_err(|e| McpError::invalid_params(e, None))?,
+            None => [0, 0, 0, 0],
+        };
+        let a = anchor.unwrap_or(Anchor::Center);
+        let (w, h) = {
+            let mut doc = self.state.document.lock();
+            doc.resize_canvas(width, height, a, fill)
+                .map_err(|e| McpError::invalid_params(e, None))?
+        };
+        self.note(format!("agent resized canvas to {w}x{h}"));
+        Ok(Json(serde_json::json!({ "canvas": { "width": w, "height": h } })))
     }
 
     #[tool(description = "Clear the lasso selection so subsequent ops apply to the whole image.")]
@@ -354,6 +407,50 @@ struct SaveArgs {
     /// Optional output path; defaults to the opened file.
     #[serde(default)]
     path: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+struct PasteImageArgs {
+    /// Base64-encoded PNG to composite onto the canvas.
+    image_b64: String,
+    /// Top-left x in image pixels (may be negative to clip).
+    x: i64,
+    /// Top-left y in image pixels.
+    y: i64,
+    /// Alpha-composite (true, default) or hard replace (false).
+    #[serde(default)]
+    blend: Option<bool>,
+    /// Restrict writes to the current selection polygon.
+    #[serde(default)]
+    within_selection: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+struct PasteFileArgs {
+    /// Path of the image file to paste (png, jpeg, webp, gif, bmp).
+    path: String,
+    /// Top-left x in image pixels (may be negative to clip).
+    x: i64,
+    /// Top-left y in image pixels.
+    y: i64,
+    /// Alpha-composite (true, default) or hard replace (false).
+    #[serde(default)]
+    blend: Option<bool>,
+    /// Restrict writes to the current selection polygon.
+    #[serde(default)]
+    within_selection: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+struct ResizeCanvasArgs {
+    width: u32,
+    height: u32,
+    /// Where the old canvas lands: top_left, top, top_right, left, center, right, bottom_left, bottom, bottom_right.
+    #[serde(default)]
+    anchor: Option<Anchor>,
+    /// Fill for new areas: "#RRGGBB", "#RRGGBBAA" or "transparent". Default transparent.
+    #[serde(default)]
+    fill: Option<String>,
 }
 
 // ---- server plumbing ---------------------------------------------------------

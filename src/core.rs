@@ -151,16 +151,24 @@ impl Document {
     }
 
     /// Load a file from disk, replacing current state. Returns dimensions.
+    ///
+    /// Same-dimension loads (e.g. the agent re-saving the file externally and
+    /// reloading) keep the undo/redo history so Ctrl+Z still walks back through
+    /// prior states. Different dimensions reset history — old pixels cannot be
+    /// restored onto a different canvas size.
     pub fn open(&mut self, path: &Path) -> Result<(u32, u32), String> {
         let img = image::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
         let rgba = img.to_rgba8();
         let (w, h) = (rgba.width(), rgba.height());
+        let same_size = (w, h) == self.canvas.dimensions() && self.path.is_some();
         self.original = rgba.clone();
         self.canvas = rgba;
         self.path = Some(path.to_path_buf());
         self.selection = None;
-        self.undo.clear();
-        self.redo.clear();
+        if !same_size {
+            self.undo.clear();
+            self.redo.clear();
+        }
         self.rev += 1;
         Ok((w, h))
     }
@@ -267,6 +275,98 @@ impl Document {
         Ok(format!("{op_desc} applied to {scope}"))
     }
 
+    /// Composite `img` onto the canvas at (x, y). `blend` alpha-composites;
+    /// otherwise pixels are replaced. `within_selection` restricts writes to
+    /// the current selection's polygon. Returns pasted dimensions.
+    pub fn paste(
+        &mut self,
+        img: &RgbaImage,
+        x: i64,
+        y: i64,
+        blend: bool,
+        within_selection: bool,
+    ) -> Result<(u32, u32), String> {
+        self.push_undo();
+        let (cw, ch) = self.canvas.dimensions();
+        let (iw, ih) = img.dimensions();
+        let mask = if within_selection {
+            match &self.selection {
+                Some(sel) => Some(polygon_mask(cw, ch, &sel.polygon)),
+                None => return Err("within_selection requires an active selection".into()),
+            }
+        } else {
+            None
+        };
+        for dy in 0..ih {
+            let gy = y + dy as i64;
+            if gy < 0 || gy >= ch as i64 {
+                continue;
+            }
+            for dx in 0..iw {
+                let gx = x + dx as i64;
+                if gx < 0 || gx >= cw as i64 {
+                    continue;
+                }
+                if let Some(m) = &mask {
+                    if !m[(gy as u32 * cw + gx as u32) as usize] {
+                        continue;
+                    }
+                }
+                let src = img.get_pixel(dx, dy);
+                if blend {
+                    let dst = self.canvas.get_pixel(gx as u32, gy as u32);
+                    let out = alpha_over(*dst, *src);
+                    self.canvas.put_pixel(gx as u32, gy as u32, out);
+                } else {
+                    self.canvas.put_pixel(gx as u32, gy as u32, *src);
+                }
+            }
+        }
+        Ok((iw, ih))
+    }
+
+    /// Resize the canvas to `width x height`, placing the old canvas at an
+    /// anchor, filling new areas with `fill`. Returns new dimensions.
+    pub fn resize_canvas(
+        &mut self,
+        width: u32,
+        height: u32,
+        anchor: Anchor,
+        fill: [u8; 4],
+    ) -> Result<(u32, u32), String> {
+        if width == 0 || height == 0 {
+            return Err("canvas dimensions must be non-zero".into());
+        }
+        self.push_undo();
+        let (ow, oh) = self.canvas.dimensions();
+        let (ox, oy) = match anchor {
+            Anchor::TopLeft => (0i64, 0i64),
+            Anchor::Top => ((width as i64 - ow as i64) / 2, 0),
+            Anchor::TopRight => (width as i64 - ow as i64, 0),
+            Anchor::Left => (0, (height as i64 - oh as i64) / 2),
+            Anchor::Center => (
+                (width as i64 - ow as i64) / 2,
+                (height as i64 - oh as i64) / 2,
+            ),
+            Anchor::Right => (width as i64 - ow as i64, (height as i64 - oh as i64) / 2),
+            Anchor::BottomLeft => (0, height as i64 - oh as i64),
+            Anchor::Bottom => (
+                (width as i64 - ow as i64) / 2,
+                height as i64 - oh as i64,
+            ),
+            Anchor::BottomRight => (width as i64 - ow as i64, height as i64 - oh as i64),
+        };
+        let mut next = RgbaImage::from_pixel(width, height, image::Rgba(fill));
+        image::imageops::overlay(&mut next, &self.canvas, ox, oy);
+        self.canvas = next;
+        self.selection = None; // old coordinates no longer meaningful
+        Ok((width, height))
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
     /// Set the selection from raw points; returns bbox description when valid.
     pub fn set_selection(&mut self, pts: Vec<[f32; 2]>) -> Result<Option<String>, String> {
         if pts.len() < 3 {
@@ -326,6 +426,49 @@ impl Document {
         let (w, h) = self.canvas.dimensions();
         Ok((path, w, h))
     }
+}
+
+/// Decode a base64 PNG into RGBA pixels.
+pub fn decode_png_b64(b64: &str) -> Result<RgbaImage, String> {
+    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64.trim())
+        .map_err(|e| format!("invalid base64: {e}"))?;
+    let img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
+        .map_err(|e| format!("invalid PNG: {e}"))?;
+    Ok(img.to_rgba8())
+}
+
+/// Where the old canvas lands when resizing.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Anchor {
+    TopLeft,
+    Top,
+    TopRight,
+    Left,
+    Center,
+    Right,
+    BottomLeft,
+    Bottom,
+    BottomRight,
+}
+
+/// Standard straight-alpha "source over" composite.
+fn alpha_over(dst: image::Rgba<u8>, src: image::Rgba<u8>) -> image::Rgba<u8> {
+    let sa = src[3] as u32;
+    let da = dst[3] as u32;
+    let out_a = sa + da * (255 - sa) / 255;
+    if out_a == 0 {
+        return image::Rgba([0, 0, 0, 0]);
+    }
+    let mix = |s: u32, d: u32| {
+        ((s * sa + d * da * (255 - sa) / 255) / out_a).min(255) as u8
+    };
+    image::Rgba([
+        mix(src[0] as u32, dst[0] as u32),
+        mix(src[1] as u32, dst[1] as u32),
+        mix(src[2] as u32, dst[2] as u32),
+        out_a.min(255) as u8,
+    ])
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
@@ -583,6 +726,80 @@ mod tests {
         doc.undo();
         assert_eq!(doc.canvas.dimensions(), (8, 8));
         assert!(doc.selection.is_none(), "selection must not survive crop undo");
+    }
+
+    #[test]
+    fn paste_blends_and_replaces_and_clips() {
+        let mut doc = Document::new();
+        doc.canvas = RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 0, 255]));
+        let mut patch = RgbaImage::new(2, 2);
+        patch.put_pixel(0, 0, image::Rgba([255, 0, 0, 128])); // blend
+        patch.put_pixel(1, 0, image::Rgba([0, 255, 0, 255])); // replace-style full alpha
+        doc.paste(&patch, 2, 2, true, false).unwrap();
+        // blended red over black: r = 255*128/255 ≈ 128
+        let p = doc.canvas.get_pixel(2, 2);
+        assert_eq!(p[0], 128);
+        assert_eq!(p[3], 255); // dst alpha was 255, stays 255
+        assert_eq!(doc.canvas.get_pixel(3, 2), &image::Rgba([0, 255, 0, 255]));
+        // paste partially off-canvas: clipped without panic
+        doc.paste(&patch, 3, 3, true, false).unwrap();
+        // undo removes the last paste only
+        doc.undo();
+        assert_eq!(doc.canvas.get_pixel(3, 3), &image::Rgba([0, 0, 0, 255]));
+        assert_eq!(doc.canvas.get_pixel(3, 2), &image::Rgba([0, 255, 0, 255]));
+    }
+
+    #[test]
+    fn paste_within_selection_masks_outside() {
+        let mut doc = Document::new();
+        doc.canvas = RgbaImage::from_pixel(6, 6, image::Rgba([0, 0, 0, 255]));
+        doc.selection = Some(Selection::from_rect(0.0, 0.0, 2.0, 2.0).unwrap());
+        let patch = RgbaImage::from_pixel(6, 6, image::Rgba([255, 255, 255, 255]));
+        doc.paste(&patch, 0, 0, false, true).unwrap();
+        assert_eq!(doc.canvas.get_pixel(0, 0), &image::Rgba([255, 255, 255, 255]));
+        assert_eq!(doc.canvas.get_pixel(5, 5), &image::Rgba([0, 0, 0, 255]));
+        assert!(doc.paste(&patch, 0, 0, false, true).is_ok());
+        doc.selection = None;
+        assert!(doc.paste(&patch, 0, 0, false, true).is_err());
+    }
+
+    #[test]
+    fn resize_canvas_anchors_and_fills() {
+        let mut doc = Document::new();
+        doc.canvas = RgbaImage::from_pixel(2, 2, image::Rgba([9, 9, 9, 255]));
+        doc.selection = Some(Selection::from_rect(0.0, 0.0, 1.0, 1.0).unwrap());
+        doc.resize_canvas(4, 4, Anchor::BottomRight, [1, 2, 3, 255]).unwrap();
+        assert_eq!(doc.canvas.dimensions(), (4, 4));
+        assert_eq!(doc.canvas.get_pixel(3, 3), &image::Rgba([9, 9, 9, 255]));
+        assert_eq!(doc.canvas.get_pixel(0, 0), &image::Rgba([1, 2, 3, 255]));
+        assert!(doc.selection.is_none());
+        doc.undo();
+        assert_eq!(doc.canvas.dimensions(), (2, 2));
+    }
+
+    #[test]
+    fn open_same_size_preserves_history_different_size_resets() {
+        let dir = std::env::temp_dir().join(format!("lasso-open-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("x.png");
+        RgbaImage::from_pixel(4, 4, image::Rgba([1, 1, 1, 255])).save_with_format(&p, image::ImageFormat::Png).unwrap();
+        let mut doc = Document::new();
+        doc.open(&p).unwrap();
+        doc.selection = Some(Selection::from_rect(0.0, 0.0, 2.0, 2.0).unwrap());
+        doc.apply(Op::Fill { color: [255, 0, 0, 255] }).unwrap();
+        // agent edits externally and reloads in place, same dimensions
+        RgbaImage::from_pixel(4, 4, image::Rgba([2, 2, 2, 255])).save_with_format(&p, image::ImageFormat::Png).unwrap();
+        doc.open(&p).unwrap();
+        assert!(doc.can_undo(), "same-size reload must keep history");
+        assert_eq!(doc.canvas.get_pixel(0, 0), &image::Rgba([2, 2, 2, 255]));
+        assert!(doc.undo());
+        assert_eq!(doc.canvas.get_pixel(0, 0), &image::Rgba([1, 1, 1, 255]));
+        // different dimensions reset
+        let p2 = dir.join("y.png");
+        RgbaImage::from_pixel(8, 8, image::Rgba([3, 3, 3, 255])).save_with_format(&p2, image::ImageFormat::Png).unwrap();
+        doc.open(&p2).unwrap();
+        assert!(!doc.can_undo());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

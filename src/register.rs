@@ -18,9 +18,31 @@ fn config_path() -> Result<PathBuf, String> {
 
 const SCHEMA: &str = "https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/coding-agent/src/config/mcp-schema.json";
 
-/// Add (or update) the `lasso` MCP server entry. Returns a human message.
+/// Embedded agent skill, installed to ~/.omp/agent/skills/lasso/SKILL.md.
+const SKILL_MD: &str = include_str!("../skills/lasso/SKILL.md");
+
+/// Install (or refresh) the lasso agent skill. Returns a human message.
+pub fn install_skill() -> Result<String, String> {
+    let dir = agent_dir()?.join("skills").join("lasso");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let path = dir.join("SKILL.md");
+    std::fs::write(&path, SKILL_MD).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(format!("Installed lasso skill to {}", path.display()))
+}
+
+pub fn uninstall_skill() -> Result<String, String> {
+    let dir = agent_dir()?.join("skills").join("lasso");
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(|e| format!("remove {}: {e}", dir.display()))?;
+        return Ok(format!("Removed {}", dir.display()));
+    }
+    Ok("lasso skill was not installed".into())
+}
+
+/// Add (or update) the `lasso` MCP server entry, and install the skill.
 pub fn register() -> Result<String, String> {
-    edit_config(|root| {
+    let skill_msg = install_skill()?;
+    let config_msg = edit_config(|root| {
         let servers = root
             .as_object_mut()
             .ok_or("mcp.json: top level must be an object")?
@@ -37,17 +59,20 @@ pub fn register() -> Result<String, String> {
             }),
         );
         Ok(())
-    })
+    })?;
+    Ok(format!("{skill_msg}\n{config_msg}"))
 }
 
 /// Remove the `lasso` entry (`lasso register --remove`).
 pub fn unregister() -> Result<String, String> {
-    edit_config(|root| {
+    let skill_msg = uninstall_skill()?;
+    let config_msg = edit_config(|root| {
         if let Some(servers) = root.get_mut("mcpServers").and_then(|v| v.as_object_mut()) {
             servers.remove("lasso");
         }
         Ok(())
-    })
+    })?;
+    Ok(format!("{skill_msg}\n{config_msg}"))
 }
 
 fn edit_config(f: impl FnOnce(&mut serde_json::Value) -> Result<(), String>) -> Result<String, String> {
