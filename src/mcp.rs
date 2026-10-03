@@ -537,6 +537,7 @@ pub fn spawn(state: SharedState) -> Result<(), String> {
         Arc::new(rmcp::transport::streamable_http_server::session::local::LocalSessionManager::default());
     let mut config = rmcp::transport::streamable_http_server::StreamableHttpServerConfig::default();
     config.json_response = true;
+    config.max_request_body_bytes = 256 * 1024 * 1024;
     let svc = rmcp::transport::streamable_http_server::tower::StreamableHttpService::new(
         move || Ok(LassoServer::new(state.clone())),
         session_manager,

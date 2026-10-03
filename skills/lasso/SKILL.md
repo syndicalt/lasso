@@ -70,7 +70,9 @@ image. Selection state is NOT cleared by ops (crop is the exception).
 - **Annotate**: draw the arrow/text/sticker as a PNG (any renderer), then
   `paste_image {x, y}` at the right spot. Keep text large and high-contrast.
 - **Composite a generated image**: `paste_file {path, x, y, blend: true}`;
-  use `within_selection: true` to confine it to the lasso region.
+  use `within_selection: true` to confine it to the lasso region. The image
+  must be transparent outside the subject (see Rules); if the background under
+  the subject needs to change, inpaint it in a separate paste first.
 - **Extend canvas**: `resize_canvas {width, height, anchor: "center", fill: "transparent"}`
   then paste new content into the new area.
 - **Vignette / soft effects**: `selection_set_polygon` with a coarse polygon
@@ -80,6 +82,13 @@ image. Selection state is NOT cleared by ops (crop is the exception).
 
 ## Rules
 
+- **No backing plates.** When compositing generated content (`paste_image` /
+  `paste_file`), the pasted PNG must be **transparent outside the subject** —
+  never an opaque rectangle, circle, or "staged background" behind it. If the
+  original pixels under the subject must change (removed background, new
+  scenery), inpaint those pixels in a separate paste matched to the surrounding
+  photo, and keep the subject on its own transparent layer. A visible box/halo
+  in the shape of the selection after an edit is a bug.
 - NEVER edit the file behind lasso's back (Pillow/ImageMagick on the open
   path) — the window shows stale pixels and undo/redo desync. If an external
   tool already modified it, `open` the same path to reload; same-size reloads

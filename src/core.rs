@@ -286,17 +286,17 @@ impl Document {
         blend: bool,
         within_selection: bool,
     ) -> Result<(u32, u32), String> {
-        self.push_undo();
-        let (cw, ch) = self.canvas.dimensions();
-        let (iw, ih) = img.dimensions();
         let mask = if within_selection {
             match &self.selection {
-                Some(sel) => Some(polygon_mask(cw, ch, &sel.polygon)),
+                Some(sel) => Some(polygon_mask(self.canvas.dimensions().0, self.canvas.dimensions().1, &sel.polygon)),
                 None => return Err("within_selection requires an active selection".into()),
             }
         } else {
             None
         };
+        self.push_undo();
+        let (cw, ch) = self.canvas.dimensions();
+        let (iw, ih) = img.dimensions();
         for dy in 0..ih {
             let gy = y + dy as i64;
             if gy < 0 || gy >= ch as i64 {
