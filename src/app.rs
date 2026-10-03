@@ -41,6 +41,8 @@ pub struct LassoApp {
     panning: bool,
     /// Sticky: the current primary-drag gesture is a pan (Space touched it).
     gesture_is_pan: bool,
+    /// Last raw pointer position while panning, for delta computation.
+    pan_last_pos: Option<egui::Pos2>,
     pending_polygon: Vec<[f32; 2]>,
     // ui state
     sidebar_open: bool,
@@ -83,6 +85,7 @@ impl LassoApp {
             dragging: false,
             panning: false,
             gesture_is_pan: false,
+            pan_last_pos: None,
             pending_polygon: Vec::new(),
             sidebar_open: false,
             show_help: false,
@@ -398,35 +401,54 @@ impl eframe::App for LassoApp {
             };
 
             // --- pan vs select ---
-            // A primary-drag gesture is a PAN if Space is held at its start or
-            // at any point during it (sticky for the whole gesture), so
-            // pressing/releasing Space mid-drag never commits a selection.
+            // Pan is driven by RAW pointer state (button_down + press_origin +
+            // latest_pos), not by egui's widget drag classification, so it is
+            // immune to click-vs-drag thresholds and frame-order quirks:
+            // - right button down + move        => pan
+            // - Space held + primary down + move => pan (sticky per gesture)
+            let pointer = ctx.input(|i| i.pointer.clone());
             let space_down = ctx.input(|i| i.key_down(Key::Space));
-            let primary_dragging = response.dragged_by(PointerButton::Primary);
-            let right_dragging = response.dragged_by(PointerButton::Secondary);
+            let primary_down = pointer.button_down(PointerButton::Primary);
+            let right_down = pointer.button_down(PointerButton::Secondary);
+            let inside = rect.contains(pointer.latest_pos().unwrap_or_default());
 
-            if !primary_dragging && !right_dragging {
-                self.gesture_is_pan = false; // reset between gestures
+            // Track which gesture is active and where it started.
+            let gesture_origin = pointer.press_origin();
+            if gesture_origin.is_none() {
+                // No button held: clear per-gesture state.
+                self.gesture_is_pan = false;
+                self.pan_last_pos = None;
+            } else if self.pan_last_pos.is_none() {
+                self.pan_last_pos = gesture_origin;
             }
-            if primary_dragging && space_down {
+
+            let over_selection_origin = gesture_origin
+                .map(|o| rect.contains(o))
+                .unwrap_or(false);
+
+            // Decide pan for this frame. Once a gesture is a pan, it stays one.
+            let mut panning = right_down && over_selection_origin;
+            if !self.gesture_is_pan && space_down && primary_down && inside {
                 self.gesture_is_pan = true;
+                self.dragging = false;
+                self.freehand.clear();
+                self.drag_start = None;
+                self.drag_current = None;
             }
-            let panning = right_dragging || (primary_dragging && self.gesture_is_pan);
+            panning |= self.gesture_is_pan && primary_down;
+            self.panning = panning;
 
-            if space_down && response.hovered() {
+            if space_down && inside {
                 ctx.set_cursor_icon(egui::CursorIcon::Grab);
             }
+
             if panning {
-                if primary_dragging {
-                    self.pan += response.drag_delta();
+                if let (Some(last), Some(cur)) = (self.pan_last_pos, pointer.latest_pos()) {
+                    if right_down || self.gesture_is_pan {
+                        self.pan += cur - last;
+                    }
                 }
-                // Pan took over this gesture: discard any partial selection.
-                if self.gesture_is_pan {
-                    self.dragging = false;
-                    self.freehand.clear();
-                    self.drag_start = None;
-                    self.drag_current = None;
-                }
+                self.pan_last_pos = pointer.latest_pos();
                 ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
             } else {
                 // selection gestures
@@ -505,13 +527,13 @@ impl eframe::App for LassoApp {
         }
 
         // --- auto-hide sidebar (left edge hotzone) -------------------------------
-        let pointer = ctx.input(|i| i.pointer.hover_pos());
-        let over_hotzone = pointer
+        let hover = ctx.input(|i| i.pointer.hover_pos());
+        let over_hotzone = hover
             .map(|p| p.x - screen_rect.min.x < EDGE_HOTZONE)
             .unwrap_or(false);
         if over_hotzone {
             self.sidebar_open = true;
-        } else if let Some(p) = pointer {
+        } else if let Some(p) = hover {
             if p.x > screen_rect.min.x + SIDEBAR_WIDTH + 12.0 {
                 self.sidebar_open = false;
             }
@@ -610,13 +632,13 @@ impl eframe::App for LassoApp {
                 self.fit(panel_size_inner, img_size);
             }
             if z100_clicked {
-                self.set_zoom_percent(100.0, pointer, panel_min, panel_size_inner, img_size);
+                self.set_zoom_percent(100.0, hover, panel_min, panel_size_inner, img_size);
             }
             if zin_clicked {
-                self.set_zoom_percent(self.zoom * 100.0 * 1.25, pointer, panel_min, panel_size_inner, img_size);
+                self.set_zoom_percent(self.zoom * 100.0 * 1.25, hover, panel_min, panel_size_inner, img_size);
             }
             if zout_clicked {
-                self.set_zoom_percent(self.zoom * 100.0 / 1.25, pointer, panel_min, panel_size_inner, img_size);
+                self.set_zoom_percent(self.zoom * 100.0 / 1.25, hover, panel_min, panel_size_inner, img_size);
             }
             if open_clicked {
                 open_path = rfd::FileDialog::new()
