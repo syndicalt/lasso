@@ -39,6 +39,8 @@ pub struct LassoApp {
     drag_current: Option<[f32; 2]>,
     dragging: bool,
     panning: bool,
+    /// Sticky: the current primary-drag gesture is a pan (Space touched it).
+    gesture_is_pan: bool,
     pending_polygon: Vec<[f32; 2]>,
     // ui state
     sidebar_open: bool,
@@ -80,6 +82,7 @@ impl LassoApp {
             drag_current: None,
             dragging: false,
             panning: false,
+            gesture_is_pan: false,
             pending_polygon: Vec::new(),
             sidebar_open: false,
             show_help: false,
@@ -394,22 +397,36 @@ impl eframe::App for LassoApp {
                 [(p.x - rect.min.x) / self.zoom, (p.y - rect.min.y) / self.zoom]
             };
 
-            let space_drag = ctx.input(|i| i.key_down(Key::Space));
-            if space_drag && response.hovered() {
+            // --- pan vs select ---
+            // A primary-drag gesture is a PAN if Space is held at its start or
+            // at any point during it (sticky for the whole gesture), so
+            // pressing/releasing Space mid-drag never commits a selection.
+            let space_down = ctx.input(|i| i.key_down(Key::Space));
+            let primary_dragging = response.dragged_by(PointerButton::Primary);
+            let right_dragging = response.dragged_by(PointerButton::Secondary);
+
+            if !primary_dragging && !right_dragging {
+                self.gesture_is_pan = false; // reset between gestures
+            }
+            if primary_dragging && space_down {
+                self.gesture_is_pan = true;
+            }
+            let panning = right_dragging || (primary_dragging && self.gesture_is_pan);
+
+            if space_down && response.hovered() {
                 ctx.set_cursor_icon(egui::CursorIcon::Grab);
             }
-            if response.drag_started_by(PointerButton::Secondary)
-                || (space_drag && response.drag_started_by(PointerButton::Primary))
-            {
-                self.panning = true;
-            }
-            if response.drag_stopped_by(PointerButton::Secondary)
-                || (!space_drag && response.drag_stopped_by(PointerButton::Primary) && self.panning)
-            {
-                self.panning = false;
-            }
-            if self.panning {
-                self.pan += response.drag_delta();
+            if panning {
+                if primary_dragging {
+                    self.pan += response.drag_delta();
+                }
+                // Pan took over this gesture: discard any partial selection.
+                if self.gesture_is_pan {
+                    self.dragging = false;
+                    self.freehand.clear();
+                    self.drag_start = None;
+                    self.drag_current = None;
+                }
                 ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
             } else {
                 // selection gestures
