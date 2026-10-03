@@ -26,6 +26,8 @@ pub const ENDPOINT: &str = "http://127.0.0.1:8756/mcp";
 pub struct SharedState {
     pub document: Arc<Mutex<Document>>,
     pub log: Arc<Mutex<Vec<String>>>,
+    /// Set when the GUI repaints; used by MCP tools to wake the UI thread.
+    repaint: Arc<Mutex<Option<eframe::egui::Context>>>,
 }
 
 impl SharedState {
@@ -33,10 +35,23 @@ impl SharedState {
         Self {
             document,
             log: Arc::new(Mutex::new(Vec::new())),
+            repaint: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// GUI registers its context so agent edits can wake the repaint loop.
+    pub fn set_repaint_context(&self, ctx: eframe::egui::Context) {
+        *self.repaint.lock() = Some(ctx);
+    }
+
+    pub fn request_repaint(&self) {
+        if let Some(ctx) = self.repaint.lock().as_ref() {
+            ctx.request_repaint();
         }
     }
 
     fn note(&self, msg: String) {
+        self.request_repaint();
         let mut log = self.log.lock();
         log.push(msg);
         let len = log.len();
@@ -67,11 +82,18 @@ impl LassoServer {
         Parameters(OpenArgs { path }): Parameters<OpenArgs>,
     ) -> Result<Json<serde_json::Value>, McpError> {
         let path = PathBuf::from(shellexpand_path(&path));
+        // Decode OUTSIDE the lock: decoding a large file on the UI thread's
+        // lock would freeze the window ("not responding").
+        let rgba = image::open(&path)
+            .map_err(|e| McpError::invalid_params(format!("open {}: {e}", path.display()), None))?
+            .to_rgba8();
         let (w, h) = {
             let mut doc = self.state.document.lock();
-            doc.open(&path).map_err(|e| McpError::invalid_params(e, None))?
+            doc.open_from(rgba, Some(&path))
+                .map_err(|e| McpError::invalid_params(e, None))?
         };
         self.note(format!("agent opened {}", path.display()));
+        self.state.request_repaint();
         Ok(Json(serde_json::json!({
             "path": path.display().to_string(),
             "width": w,

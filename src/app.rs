@@ -69,7 +69,10 @@ fn icon_button(ui: &mut egui::Ui, icon: &str, selected: bool, tooltip: &str) -> 
 }
 
 impl LassoApp {
-    pub fn new(state: SharedState, mcp_note: Option<String>) -> Self {
+    pub fn new(state: SharedState, mcp_note: Option<String>, ctx: egui::Context) -> Self {
+        // Agent tools run on the MCP runtime thread; give them a handle to
+        // wake this UI thread when the document changes.
+        state.set_repaint_context(ctx);
         Self {
             state,
             texture: None,

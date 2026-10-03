@@ -100,7 +100,7 @@ fn launch_gui(open: Option<std::path::PathBuf>) {
             }
             _cc.egui_ctx.set_fonts(fonts);
 
-            let mut app = app::LassoApp::new(app_state, mcp_note);
+            let mut app = app::LassoApp::new(app_state, mcp_note, _cc.egui_ctx.clone());
             if let Some(p) = preload_path {
                 app.preload(&p);
             }

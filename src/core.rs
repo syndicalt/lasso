@@ -152,18 +152,26 @@ impl Document {
 
     /// Load a file from disk, replacing current state. Returns dimensions.
     ///
-    /// Same-dimension loads (e.g. the agent re-saving the file externally and
-    /// reloading) keep the undo/redo history so Ctrl+Z still walks back through
-    /// prior states. Different dimensions reset history — old pixels cannot be
-    /// restored onto a different canvas size.
+    /// Decodes the file WITHOUT holding the document lock (call `open_from`
+    /// with the decoded pixels under the lock). Same-dimension loads keep
+    /// undo/redo history; different dimensions reset it.
     pub fn open(&mut self, path: &Path) -> Result<(u32, u32), String> {
-        let img = image::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
-        let rgba = img.to_rgba8();
+        let rgba = image::open(path)
+            .map_err(|e| format!("open {}: {e}", path.display()))?
+            .to_rgba8();
+        self.open_from(rgba, Some(path))
+    }
+
+    /// Swap in pre-decoded pixels. `path` updates the document path when given.
+    /// See `open`.
+    pub fn open_from(&mut self, rgba: RgbaImage, path: Option<&Path>) -> Result<(u32, u32), String> {
         let (w, h) = (rgba.width(), rgba.height());
         let same_size = (w, h) == self.canvas.dimensions() && self.path.is_some();
         self.original = rgba.clone();
         self.canvas = rgba;
-        self.path = Some(path.to_path_buf());
+        if let Some(p) = path {
+            self.path = Some(p.to_path_buf());
+        }
         self.selection = None;
         if !same_size {
             self.undo.clear();

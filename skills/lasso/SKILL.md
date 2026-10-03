@@ -70,9 +70,8 @@ image. Selection state is NOT cleared by ops (crop is the exception).
 - **Annotate**: draw the arrow/text/sticker as a PNG (any renderer), then
   `paste_image {x, y}` at the right spot. Keep text large and high-contrast.
 - **Composite a generated image**: `paste_file {path, x, y, blend: true}`;
-  use `within_selection: true` to confine it to the lasso region. The image
-  must be transparent outside the subject (see Rules); if the background under
-  the subject needs to change, inpaint it in a separate paste first.
+  use `within_selection: true` to confine it to the lasso region. The asset
+  must be transparent outside the subject (see Rules).
 - **Extend canvas**: `resize_canvas {width, height, anchor: "center", fill: "transparent"}`
   then paste new content into the new area.
 - **Vignette / soft effects**: `selection_set_polygon` with a coarse polygon
@@ -82,13 +81,14 @@ image. Selection state is NOT cleared by ops (crop is the exception).
 
 ## Rules
 
-- **No backing plates.** When compositing generated content (`paste_image` /
-  `paste_file`), the pasted PNG must be **transparent outside the subject** —
-  never an opaque rectangle, circle, or "staged background" behind it. If the
-  original pixels under the subject must change (removed background, new
-  scenery), inpaint those pixels in a separate paste matched to the surrounding
-  photo, and keep the subject on its own transparent layer. A visible box/halo
-  in the shape of the selection after an edit is a bug.
+- **No backing plates.** The asset you paste (`paste_image` / `paste_file`)
+  must be **transparent outside the subject**. With SVG, just don't draw a
+  background element — subjects render on transparency by default. With raster
+  assets that have a background, remove it first (flood-fill from the edges,
+  chroma-key the dominant corner color, or a rembg-style model). Do NOT
+  recreate, inpaint, or "patch" the photo's surrounding pixels — how the scene
+  behind the subject looks is the model backend's decision, not yours. A
+  visible box/halo in the shape of the selection after an edit is a bug.
 - NEVER edit the file behind lasso's back (Pillow/ImageMagick on the open
   path) — the window shows stale pixels and undo/redo desync. If an external
   tool already modified it, `open` the same path to reload; same-size reloads
