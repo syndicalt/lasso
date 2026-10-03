@@ -83,6 +83,23 @@ fn launch_gui(open: Option<std::path::PathBuf>) {
         "lasso",
         native,
         Box::new(move |_cc| {
+            // Load JetBrains Mono Nerd Font so sidebar icon glyphs (PUA) resolve.
+            let mut fonts = eframe::egui::FontDefinitions::default();
+            if let Ok(data) = std::fs::read(
+                "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf",
+            ) {
+                fonts.font_data.insert(
+                    "jetbrains_nf".into(),
+                    std::sync::Arc::new(eframe::egui::FontData::from_owned(data)),
+                );
+                for family in [eframe::egui::FontFamily::Proportional, eframe::egui::FontFamily::Monospace] {
+                    if let Some(stack) = fonts.families.get_mut(&family) {
+                        stack.push("jetbrains_nf".into());
+                    }
+                }
+            }
+            _cc.egui_ctx.set_fonts(fonts);
+
             let mut app = app::LassoApp::new(app_state, mcp_note);
             if let Some(p) = preload_path {
                 app.preload(&p);
