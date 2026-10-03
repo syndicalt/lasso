@@ -404,49 +404,41 @@ impl eframe::App for LassoApp {
             // Pan is driven by RAW pointer state (button_down + press_origin +
             // latest_pos), not by egui's widget drag classification, so it is
             // immune to click-vs-drag thresholds and frame-order quirks:
-            // - right button down + move        => pan
-            // - Space held + primary down + move => pan (sticky per gesture)
+            // - Space held + primary drag => pan, ANYWHERE in the window
+            //   (Photoshop-style; sticky for the whole gesture)
+            // - right button drag => pan
             let pointer = ctx.input(|i| i.pointer.clone());
             let space_down = ctx.input(|i| i.key_down(Key::Space));
             let primary_down = pointer.button_down(PointerButton::Primary);
             let right_down = pointer.button_down(PointerButton::Secondary);
-            let inside = rect.contains(pointer.latest_pos().unwrap_or_default());
 
-            // Track which gesture is active and where it started.
-            let gesture_origin = pointer.press_origin();
-            if gesture_origin.is_none() {
+            if pointer.press_origin().is_none() {
                 // No button held: clear per-gesture state.
                 self.gesture_is_pan = false;
                 self.pan_last_pos = None;
             } else if self.pan_last_pos.is_none() {
-                self.pan_last_pos = gesture_origin;
+                self.pan_last_pos = pointer.press_origin();
             }
 
-            let over_selection_origin = gesture_origin
-                .map(|o| rect.contains(o))
-                .unwrap_or(false);
-
-            // Decide pan for this frame. Once a gesture is a pan, it stays one.
-            let mut panning = right_down && over_selection_origin;
-            if !self.gesture_is_pan && space_down && primary_down && inside {
+            if space_down && primary_down && !self.gesture_is_pan {
+                // Pan takes over this gesture: discard any partial selection.
                 self.gesture_is_pan = true;
                 self.dragging = false;
                 self.freehand.clear();
                 self.drag_start = None;
                 self.drag_current = None;
             }
-            panning |= self.gesture_is_pan && primary_down;
+            let panning = right_down || (self.gesture_is_pan && primary_down);
             self.panning = panning;
 
-            if space_down && inside {
-                ctx.set_cursor_icon(egui::CursorIcon::Grab);
+            if space_down {
+                // Grabbing (closed hand) renders in every theme; "grab" may not.
+                ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
             }
 
             if panning {
                 if let (Some(last), Some(cur)) = (self.pan_last_pos, pointer.latest_pos()) {
-                    if right_down || self.gesture_is_pan {
-                        self.pan += cur - last;
-                    }
+                    self.pan += cur - last;
                 }
                 self.pan_last_pos = pointer.latest_pos();
                 ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
